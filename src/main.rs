@@ -36,6 +36,12 @@ enum Opt {
         /// Number of seconds for user to release keys on startup
         #[arg(short, long, default_value = "2")]
         delay: f64,
+
+        /// Name of device to listen to. Overrides device_name in config.
+        device_name: Option<String>,
+
+        /// Optional PCI device path. Overrides phys in config.
+        phys: Option<String>,
     },
 }
 
@@ -71,7 +77,7 @@ fn main() -> Result<()> {
     match opt {
         Opt::ListDevices => deviceinfo::list_devices(),
         Opt::ListKeys => list_keys(),
-        Opt::Remap { config_file, delay } => {
+        Opt::Remap { device_name, phys, config_file, delay } => {
             let mapping_config = MappingConfig::from_file(&config_file).context(format!(
                 "loading MappingConfig from {}",
                 config_file.display()
@@ -81,8 +87,8 @@ fn main() -> Result<()> {
             std::thread::sleep(Duration::from_secs_f64(delay));
 
             let device_info = deviceinfo::DeviceInfo::with_name(
-                &mapping_config.device_name,
-                mapping_config.phys.as_deref(),
+                &device_name.or(mapping_config.device_name).expect("Must provide device_name on command line or in config"),
+                phys.or(mapping_config.phys).as_deref(),
             )?;
 
             let mut mapper = InputMapper::create_mapper(device_info.path, mapping_config.mappings)?;
