@@ -36,6 +36,10 @@ enum Opt {
         /// Number of seconds for user to release keys on startup
         #[arg(short, long, default_value = "2")]
         delay: f64,
+
+        /// Wait forever for the device to be found
+        #[arg(short, long, action)]
+        wait: bool,
     },
 }
 
@@ -71,7 +75,7 @@ fn main() -> Result<()> {
     match opt {
         Opt::ListDevices => deviceinfo::list_devices(),
         Opt::ListKeys => list_keys(),
-        Opt::Remap { config_file, delay } => {
+        Opt::Remap { config_file, delay, wait } => {
             let mapping_config = MappingConfig::from_file(&config_file).context(format!(
                 "loading MappingConfig from {}",
                 config_file.display()
@@ -80,12 +84,26 @@ fn main() -> Result<()> {
             log::warn!("Short delay: release any keys now!");
             std::thread::sleep(Duration::from_secs_f64(delay));
 
-            let device_info = deviceinfo::DeviceInfo::with_name(
-                &mapping_config.device_name,
-                mapping_config.phys.as_deref(),
-            )?;
+            let mut device_info;
+            let mut i = 0f64;
+            loop {
+                device_info = deviceinfo::DeviceInfo::with_name(
+                    &mapping_config.device_name,
+                    mapping_config.phys.as_deref(),
+                );
+                if !wait || device_info.is_ok() {
+                    break;
+                }
+                let msg = device_info.err();
+                if msg.is_some() {
+                    log::info!("{}", msg.unwrap());
+                }
+                std::thread::sleep(Duration::from_secs_f64(delay * i));
+                log::info!("Retrying..");
+                if i < 30f64 {i += 1f64;}
+            }
 
-            let mut mapper = InputMapper::create_mapper(device_info.path, mapping_config.mappings)?;
+            let mut mapper = InputMapper::create_mapper(device_info.unwrap().path, mapping_config.mappings)?;
             mapper.run_mapper()
         }
     }
