@@ -85,7 +85,7 @@ fn main() -> Result<()> {
                 mapping_config.phys.as_deref(),
             )?;
 
-            let mut mapper = InputMapper::create_mapper(device_info.path, mapping_config.mappings)?;
+            let mut mapper = InputMapper::create_mapper(device_info.path, mapping_config.mappings, mapping_config.modifiers)?;
             mapper.run_mapper()
         }
     }

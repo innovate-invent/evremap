@@ -10,6 +10,7 @@ pub struct MappingConfig {
     pub device_name: String,
     pub phys: Option<String>,
     pub mappings: Vec<Mapping>,
+    pub modifiers: HashSet<KeyCode>
 }
 
 impl MappingConfig {
@@ -26,10 +27,35 @@ impl MappingConfig {
         for remap in config_file.remap {
             mappings.push(remap.into());
         }
+        let modifiers;
+        if config_file.modifiers.is_empty() {
+            modifiers = HashSet::from_iter([
+                KeyCode::KEY_FN,
+                KeyCode::KEY_LEFTALT,
+                KeyCode::KEY_RIGHTALT,
+                KeyCode::KEY_LEFTMETA,
+                KeyCode::KEY_RIGHTMETA,
+                KeyCode::KEY_LEFTCTRL,
+                KeyCode::KEY_RIGHTCTRL,
+                KeyCode::KEY_LEFTSHIFT,
+                KeyCode::KEY_RIGHTSHIFT,
+            ]);
+        } else {
+            modifiers = config_file.modifiers.into_iter().map(|name|
+                match EventCode::from_str(&EventType::EV_KEY, &name) {
+                    Some(code) => match code {
+                        EventCode::EV_KEY(code) => code,
+                        _ => panic!("{}", ConfigError::ImpossibleParseKey),
+                    },
+                    None => panic!("{}", ConfigError::InvalidKey(name.to_string())),
+                }
+            ).collect()
+        }
         Ok(Self {
             device_name: config_file.device_name,
             phys: config_file.phys,
             mappings,
+            modifiers,
         })
     }
 }
@@ -123,4 +149,7 @@ struct ConfigFile {
 
     #[serde(default)]
     remap: Vec<RemapConfig>,
+
+    #[serde(default)]
+    modifiers: Vec<String>,
 }

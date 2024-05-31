@@ -61,6 +61,7 @@ pub struct InputMapper {
     tapping: Option<KeyCode>,
 
     output_keys: HashSet<KeyCode>,
+    modifiers: HashSet<KeyCode>,
 }
 
 fn enable_key_code(input: &mut Device, key: KeyCode) -> Result<()> {
@@ -71,7 +72,7 @@ fn enable_key_code(input: &mut Device, key: KeyCode) -> Result<()> {
 }
 
 impl InputMapper {
-    pub fn create_mapper<P: AsRef<Path>>(path: P, mappings: Vec<Mapping>) -> Result<Self> {
+    pub fn create_mapper<P: AsRef<Path>>(path: P, mappings: Vec<Mapping>, modifiers: HashSet<KeyCode>) -> Result<Self> {
         let path = path.as_ref();
         let f = std::fs::File::open(path).context(format!("opening {}", path.display()))?;
         let mut input = Device::new_from_file(f)
@@ -112,6 +113,7 @@ impl InputMapper {
             output_keys: HashSet::new(),
             tapping: None,
             mappings,
+            modifiers,
         })
     }
 
@@ -162,7 +164,7 @@ impl InputMapper {
                 if input.is_subset(&keys_minus_remapped) {
                     for i in input {
                         keys.remove(i);
-                        if !is_modifier(i) {
+                        if !self.is_modifier(i) {
                             keys_minus_remapped.remove(i);
                         }
                     }
@@ -170,7 +172,7 @@ impl InputMapper {
                         keys.insert(o.clone());
                         // Outputs that apply are not visible as
                         // inputs for later remap rules
-                        if !is_modifier(o) {
+                        if !self.is_modifier(o) {
                             keys_minus_remapped.remove(o);
                         }
                     }
@@ -207,11 +209,11 @@ impl InputMapper {
             .collect();
 
         if !to_release.is_empty() {
-            to_release.sort_by(modifiers_last);
+            to_release.sort_by(|a,b| self.modifiers_last(a,b));
             self.emit_keys(&to_release, time, KeyEventType::Release)?;
         }
         if !to_press.is_empty() {
-            to_press.sort_by(modifiers_first);
+            to_press.sort_by(|a,b| self.modifiers_first(a,b));
             self.emit_keys(&to_press, time, KeyEventType::Press)?;
         }
         Ok(())
@@ -392,45 +394,34 @@ impl InputMapper {
         ))?;
         Ok(())
     }
+
+    fn is_modifier(&self, key: &KeyCode) -> bool {
+        self.modifiers.contains(key)
+    }
+
+    /// Orders modifier keys ahead of non-modifier keys.
+    /// Unfortunately the underlying type doesn't allow direct
+    /// comparison, but that's ok for our purposes.
+    fn modifiers_first(&self, a: &KeyCode, b: &KeyCode) -> Ordering {
+        if self.is_modifier(a) {
+            if self.is_modifier(b) {
+                Ordering::Equal
+            } else {
+                Ordering::Less
+            }
+        } else if self.is_modifier(b) {
+            Ordering::Greater
+        } else {
+            // Neither are modifiers
+            Ordering::Equal
+        }
+    }
+
+    fn modifiers_last(&self, a: &KeyCode, b: &KeyCode) -> Ordering {
+        self.modifiers_first(a, b).reverse()
+    }
 }
 
 fn make_event(key: KeyCode, time: &TimeVal, event_type: KeyEventType) -> InputEvent {
     InputEvent::new(time, &EventCode::EV_KEY(key), event_type.value())
-}
-
-fn is_modifier(key: &KeyCode) -> bool {
-    match key {
-        KeyCode::KEY_FN
-        | KeyCode::KEY_LEFTALT
-        | KeyCode::KEY_RIGHTALT
-        | KeyCode::KEY_LEFTMETA
-        | KeyCode::KEY_RIGHTMETA
-        | KeyCode::KEY_LEFTCTRL
-        | KeyCode::KEY_RIGHTCTRL
-        | KeyCode::KEY_LEFTSHIFT
-        | KeyCode::KEY_RIGHTSHIFT => true,
-        _ => false,
-    }
-}
-
-/// Orders modifier keys ahead of non-modifier keys.
-/// Unfortunately the underlying type doesn't allow direct
-/// comparison, but that's ok for our purposes.
-fn modifiers_first(a: &KeyCode, b: &KeyCode) -> Ordering {
-    if is_modifier(a) {
-        if is_modifier(b) {
-            Ordering::Equal
-        } else {
-            Ordering::Less
-        }
-    } else if is_modifier(b) {
-        Ordering::Greater
-    } else {
-        // Neither are modifiers
-        Ordering::Equal
-    }
-}
-
-fn modifiers_last(a: &KeyCode, b: &KeyCode) -> Ordering {
-    modifiers_first(a, b).reverse()
 }

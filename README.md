@@ -89,6 +89,23 @@ input = ["KEY_F8"]
 output = ["KEY_MUTE"]
 ```
 
+If you want to override the default modifiers (KEY_LEFTALT, KEY_LEFTCTRL, etc.)
+you can list all the modifier keys via the `modifiers = []` config option.
+
+```toml
+modifiers = [
+  "KEY_FN",
+  "KEY_LEFTALT",
+  "KEY_RIGHTALT",
+  "KEY_LEFTMETA",
+  "KEY_RIGHTMETA",
+  "KEY_LEFTCTRL",
+  "KEY_RIGHTCTRL",
+  "KEY_LEFTSHIFT",
+  "KEY_RIGHTSHIFT",
+]
+```
+
 * How do I list available input devices?
   `sudo evremap list-devices`
 
