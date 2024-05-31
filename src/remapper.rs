@@ -1,6 +1,7 @@
 use crate::mapping::*;
 use anyhow::*;
 use evdev_rs::{DeviceWrapper, Device, GrabMode, InputEvent, ReadFlag, TimeVal, UInputDevice};
+use evdev_rs::enums::EV_KEY;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -48,6 +49,25 @@ fn timeval_diff(newer: &TimeVal, older: &TimeVal) -> Duration {
     Duration::from_micros(((secs * MICROS_PER_SECOND) + usecs) as u64)
 }
 
+const fn to_event_type(code: &EventCode) -> EventType {
+    match code {
+        EventCode::EV_SYN(_n) => EventType::EV_SYN,
+        EventCode::EV_KEY(_n) => EventType::EV_KEY,
+        EventCode::EV_REL(_n) => EventType::EV_REL,
+        EventCode::EV_ABS(_n) => EventType::EV_ABS,
+        EventCode::EV_MSC(_n) => EventType::EV_MSC,
+        EventCode::EV_SW(_n) => EventType::EV_SW,
+        EventCode::EV_LED(_n) => EventType::EV_LED,
+        EventCode::EV_SND(_n) => EventType::EV_SND,
+        EventCode::EV_REP(_n) => EventType::EV_REP,
+        EventCode::EV_FF(_n) => EventType::EV_FF,
+        EventCode::EV_PWR => EventType::EV_PWR,
+        EventCode::EV_FF_STATUS(_n) => EventType::EV_FF_STATUS,
+        EventCode::EV_MAX => EventType::EV_MAX,
+        _ => EventType::EV_UNK,
+    }
+}
+
 pub struct InputMapper {
     input: Device,
     output: UInputDevice,
@@ -56,6 +76,7 @@ pub struct InputMapper {
     input_state: HashMap<KeyCode, TimeVal>,
 
     mappings: Vec<Mapping>,
+    mapped_types: HashSet<EventType>,
 
     /// The most recent candidate for a tap function is held here
     tapping: Option<KeyCode>,
@@ -65,7 +86,7 @@ pub struct InputMapper {
 
 fn enable_key_code(input: &mut Device, key: KeyCode) -> Result<()> {
     input
-        .enable(EventCode::EV_KEY(key.clone()))
+        .enable(key.clone())
         .context(format!("enable key {:?}", key))?;
     Ok(())
 }
@@ -74,44 +95,49 @@ impl InputMapper {
     pub fn create_mapper<P: AsRef<Path>>(path: P, mappings: Vec<Mapping>) -> Result<Self> {
         let path = path.as_ref();
         let f = std::fs::File::open(path).context(format!("opening {}", path.display()))?;
-        let mut input = Device::new_from_file(f)
+        let mut input_device = Device::new_from_file(f)
             .with_context(|| format!("failed to create new Device from file {}", path.display()))?;
 
-        input.set_name(&format!("evremap Virtual input for {}", path.display()));
-
+        input_device.set_name(&format!("evremap Virtual input for {}", path.display()));
+        let mut mapped_types = HashSet::new();
         // Ensure that any remapped keys are supported by the generated output device
         for map in &mappings {
             match map {
-                Mapping::DualRole { tap, hold, .. } => {
+                Mapping::DualRole {input, tap, hold, .. } => {
+                    mapped_types.insert(to_event_type(input));
                     for t in tap {
-                        enable_key_code(&mut input, t.clone())?;
+                        enable_key_code(&mut input_device, t.clone())?;
                     }
                     for h in hold {
-                        enable_key_code(&mut input, h.clone())?;
+                        enable_key_code(&mut input_device, h.clone())?;
                     }
                 }
-                Mapping::Remap { output, .. } => {
+                Mapping::Remap { input, output, .. } => {
+                    for i in input {
+                        mapped_types.insert(to_event_type(&i.code));
+                    }
                     for o in output {
-                        enable_key_code(&mut input, o.clone())?;
+                        enable_key_code(&mut input_device, o.code.clone())?;
                     }
                 }
             }
         }
 
-        let output = UInputDevice::create_from_device(&input)
+        let output = UInputDevice::create_from_device(&input_device)
             .context(format!("creating UInputDevice from {}", path.display()))?;
 
-        input
+        input_device
             .grab(GrabMode::Grab)
             .context(format!("grabbing exclusive access on {}", path.display()))?;
 
         Ok(Self {
-            input,
+            input: input_device,
             output,
             input_state: HashMap::new(),
             output_keys: HashSet::new(),
             tapping: None,
             mappings,
+            mapped_types,
         })
     }
 
@@ -123,9 +149,9 @@ impl InputMapper {
                 .next_event(ReadFlag::NORMAL | ReadFlag::BLOCKING)?;
             match status {
                 evdev_rs::ReadStatus::Success => {
-                    if let EventCode::EV_KEY(ref key) = event.event_code {
+                    if self.mapped_types.contains(&to_event_type(&event.event_code)) {
                         log::trace!("IN {:?}", event);
-                        self.update_with_event(&event, key.clone())?;
+                        self.update_with_event(&event, event.event_code.clone())?;
                     } else {
                         log::trace!("PASSTHRU {:?}", event);
                         self.output.write_event(&event)?;
@@ -159,19 +185,23 @@ impl InputMapper {
         // Second pass to apply Remap items
         for map in &self.mappings {
             if let Mapping::Remap { input, output } = map {
-                if input.is_subset(&keys_minus_remapped) {
+                if keys_minus_remapped.is_superset(&input.into_iter().map(|k|k.code).collect()) {
                     for i in input {
-                        keys.remove(i);
-                        if !is_modifier(i) {
-                            keys_minus_remapped.remove(i);
+                        keys.remove(&i.code);
+                        if let EventCode::EV_KEY(k) = i.code {
+                            if !is_modifier(&k) {
+                                keys_minus_remapped.remove(&i.code);
+                            }
                         }
                     }
                     for o in output {
-                        keys.insert(o.clone());
+                        keys.insert(o.code.clone());
                         // Outputs that apply are not visible as
                         // inputs for later remap rules
-                        if !is_modifier(o) {
-                            keys_minus_remapped.remove(o);
+                        if let EventCode::EV_KEY(k) = o.code {
+                            if !is_modifier(&k) {
+                                keys_minus_remapped.remove(&o.code);
+                            }
                         }
                     }
                 }
@@ -230,7 +260,7 @@ impl InputMapper {
         None
     }
 
-    fn lookup_mapping(&self, code: KeyCode) -> Option<Mapping> {
+    fn lookup_mapping(&self, code: KeyCode, value: i32) -> Option<Mapping> {
         let mut candidates = vec![];
 
         for map in &self.mappings {
@@ -250,8 +280,11 @@ impl InputMapper {
                     let mut all_matched = true;
                     for i in input {
                         if *i == code {
-                            code_matched = true;
-                        } else if !self.input_state.contains_key(i) {
+                            code_matched = match i.code {
+                                EventCode::EV_KEY(_) => true,
+                                _ => i.scale == 0 || i.scale.is_negative() == value.is_negative()
+                            }
+                        } else if !self.input_state.contains_key(&i.code) {
                             all_matched = false;
                             break;
                         }
@@ -276,69 +309,99 @@ impl InputMapper {
     }
 
     pub fn update_with_event(&mut self, event: &InputEvent, code: KeyCode) -> Result<()> {
-        let event_type = KeyEventType::from_value(event.value);
-        match event_type {
-            KeyEventType::Release => {
-                let pressed_at = match self.input_state.remove(&code) {
-                    None => {
-                        self.write_event_and_sync(event)?;
-                        return Ok(());
-                    }
-                    Some(p) => p,
-                };
+        match event.event_type().ok_or("Unknown event type").unwrap() {
+            EventType::EV_KEY => {
+                let event_type = KeyEventType::from_value(event.value);
+                match event_type {
+                    KeyEventType::Release => {
+                        let pressed_at = match self.input_state.remove(&code) {
+                            None => {
+                                self.write_event_and_sync(event)?;
+                                return Ok(());
+                            }
+                            Some(p) => p,
+                        };
 
-                self.compute_and_apply_keys(&event.time)?;
+                        self.compute_and_apply_keys(&event.time)?;
 
-                if let Some(Mapping::DualRole { tap, .. }) =
-                    self.lookup_dual_role_mapping(code.clone())
-                {
-                    // If released quickly enough, becomes a tap press.
-                    if let Some(tapping) = self.tapping.take() {
-                        if tapping == code
-                            && timeval_diff(&event.time, &pressed_at) <= Duration::from_millis(200)
+                        if let Some(Mapping::DualRole { tap, .. }) =
+                            self.lookup_dual_role_mapping(code.clone())
                         {
-                            self.emit_keys(&tap, &event.time, KeyEventType::Press)?;
-                            self.emit_keys(&tap, &event.time, KeyEventType::Release)?;
+                            // If released quickly enough, becomes a tap press.
+                            if let Some(tapping) = self.tapping.take() {
+                                if tapping == code
+                                    && timeval_diff(&event.time, &pressed_at) <= Duration::from_millis(200)
+                                {
+                                    self.emit_keys(&tap, &event.time, KeyEventType::Press)?;
+                                    self.emit_keys(&tap, &event.time, KeyEventType::Release)?;
+                                }
+                            }
                         }
                     }
-                }
-            }
-            KeyEventType::Press => {
-                self.input_state.insert(code.clone(), event.time.clone());
+                    KeyEventType::Press => {
+                        self.input_state.insert(code.clone(), event.time.clone());
 
-                match self.lookup_mapping(code.clone()) {
-                    Some(_) => {
-                        self.compute_and_apply_keys(&event.time)?;
-                        self.tapping.replace(code);
+                        match self.lookup_mapping(code.clone(), KeyEventType::Press.value()) {
+                            Some(_) => {
+                                self.compute_and_apply_keys(&event.time)?;
+                                self.tapping.replace(code);
+                            }
+                            None => {
+                                // Just pass it through
+                                self.cancel_pending_tap();
+                                self.compute_and_apply_keys(&event.time)?;
+                            }
+                        }
                     }
-                    None => {
-                        // Just pass it through
-                        self.cancel_pending_tap();
-                        self.compute_and_apply_keys(&event.time)?;
+                    KeyEventType::Repeat => {
+                        match self.lookup_mapping(code.clone(), KeyEventType::Repeat.value()) {
+                            Some(Mapping::DualRole { hold, .. }) => {
+                                self.emit_keys(&hold, &event.time, KeyEventType::Repeat)?;
+                            }
+                            Some(Mapping::Remap { output, .. }) => {
+                                let output: Vec<KeyCode> = output.into_iter().map(|k|k.code).collect();
+                                self.emit_keys(&output, &event.time, KeyEventType::Repeat)?;
+                            }
+                            None => {
+                                // Just pass it through
+                                self.cancel_pending_tap();
+                                self.write_event_and_sync(event)?;
+                            }
+                        }
                     }
-                }
+                    KeyEventType::Unknown(_) => {
+                        self.write_event_and_sync(event)?;
+                    }
+                };
             }
-            KeyEventType::Repeat => {
-                match self.lookup_mapping(code.clone()) {
-                    Some(Mapping::DualRole { hold, .. }) => {
-                        self.emit_keys(&hold, &event.time, KeyEventType::Repeat)?;
+            _ => {  // All other event types, assume provides value
+                match self.lookup_mapping(code.clone(), event.value) {
+                    Some(Mapping::Remap { input, output, .. }) => {
+                        match input.iter().find(|wrapper| wrapper.code == event.event_code && (wrapper.scale == 0 || wrapper.scale.is_negative() == event.value.is_negative())) {
+                            Some(input_wrapper) => {
+                                for k in output {
+                                    let out_val = match k.code {
+                                        EventCode::EV_KEY(_) => KeyEventType::Press.value(),
+                                        _ => (event.value / (if input_wrapper.scale == 0 {1} else {input_wrapper.scale})) * (if k.scale == 0 {1} else {k.scale}),
+                                    };
+                                    self.write_event(&InputEvent::new(&event.time, &k.code, out_val)).expect("Failed to write event");
+                                    if let EventCode::EV_KEY(_) = k.code {
+                                        self.write_event(&InputEvent::new(&event.time, &k.code, KeyEventType::Release.value())).expect("Failed to write event");
+                                    }
+                                }
+                                self.generate_sync_event(&event.time)?;
+                            },
+                            None => {}
+                        }
                     }
-                    Some(Mapping::Remap { output, .. }) => {
-                        let output: Vec<KeyCode> = output.iter().cloned().collect();
-                        self.emit_keys(&output, &event.time, KeyEventType::Repeat)?;
-                    }
-                    None => {
+                    _ => {
                         // Just pass it through
                         self.cancel_pending_tap();
                         self.write_event_and_sync(event)?;
                     }
                 }
             }
-            KeyEventType::Unknown(_) => {
-                self.write_event_and_sync(event)?;
-            }
         }
-
         Ok(())
     }
 
@@ -369,14 +432,14 @@ impl InputMapper {
     fn write_event(&mut self, event: &InputEvent) -> Result<()> {
         log::trace!("OUT: {:?}", event);
         self.output.write_event(&event)?;
-        if let EventCode::EV_KEY(ref key) = event.event_code {
+        if let EventCode::EV_KEY(_) = event.event_code {
             let event_type = KeyEventType::from_value(event.value);
             match event_type {
                 KeyEventType::Press | KeyEventType::Repeat => {
-                    self.output_keys.insert(key.clone());
+                    self.output_keys.insert(event.event_code.clone());
                 }
                 KeyEventType::Release => {
-                    self.output_keys.remove(key);
+                    self.output_keys.remove(&event.event_code);
                 }
                 _ => {}
             }
@@ -395,20 +458,20 @@ impl InputMapper {
 }
 
 fn make_event(key: KeyCode, time: &TimeVal, event_type: KeyEventType) -> InputEvent {
-    InputEvent::new(time, &EventCode::EV_KEY(key), event_type.value())
+    InputEvent::new(time, &key, event_type.value())
 }
 
-fn is_modifier(key: &KeyCode) -> bool {
+fn is_modifier(key: &EV_KEY) -> bool {
     match key {
-        KeyCode::KEY_FN
-        | KeyCode::KEY_LEFTALT
-        | KeyCode::KEY_RIGHTALT
-        | KeyCode::KEY_LEFTMETA
-        | KeyCode::KEY_RIGHTMETA
-        | KeyCode::KEY_LEFTCTRL
-        | KeyCode::KEY_RIGHTCTRL
-        | KeyCode::KEY_LEFTSHIFT
-        | KeyCode::KEY_RIGHTSHIFT => true,
+        EV_KEY::KEY_FN
+        | EV_KEY::KEY_LEFTALT
+        | EV_KEY::KEY_RIGHTALT
+        | EV_KEY::KEY_LEFTMETA
+        | EV_KEY::KEY_RIGHTMETA
+        | EV_KEY::KEY_LEFTCTRL
+        | EV_KEY::KEY_RIGHTCTRL
+        | EV_KEY::KEY_LEFTSHIFT
+        | EV_KEY::KEY_RIGHTSHIFT => true,
         _ => false,
     }
 }
@@ -417,13 +480,21 @@ fn is_modifier(key: &KeyCode) -> bool {
 /// Unfortunately the underlying type doesn't allow direct
 /// comparison, but that's ok for our purposes.
 fn modifiers_first(a: &KeyCode, b: &KeyCode) -> Ordering {
-    if is_modifier(a) {
-        if is_modifier(b) {
+    let mut a_ismod = false;
+    let mut b_ismod = false;
+    if let EventCode::EV_KEY(k) = a {
+       a_ismod = is_modifier(&k);
+    }
+    if let EventCode::EV_KEY(k) = b {
+       b_ismod = is_modifier(&k);
+    }
+    if a_ismod && b_ismod {
+        if b_ismod {
             Ordering::Equal
         } else {
             Ordering::Less
         }
-    } else if is_modifier(b) {
+    } else if b_ismod {
         Ordering::Greater
     } else {
         // Neither are modifiers

@@ -89,6 +89,42 @@ input = ["KEY_F8"]
 output = ["KEY_MUTE"]
 ```
 
+`REL_*` and `ABS_*` input types are also supported. These have an associated 
+positive or negative value depending on the relative direction of the input.
+You can optionally specify the relative direction by appending a "+" or "-" 
+to the input name. For example, if you wanted to remap your scroll wheel to 
+a keypress:
+
+```toml
+[[remap]]
+input = ["REL_WHEEL+"]
+output = ["KEY_UP"]
+
+[[remap]]
+input = ["REL_WHEEL-"]
+output = ["KEY_DOWN"]
+```
+
+Mapping relative inputs to relative inputs is also possible, you can include 
+a scaling factor to both the input value and output. The input value is divided 
+by the input scaling factor, and the output is multiplied by the output scaling 
+factor. Specify a negative scale factor on the output to invert the input. If you 
+provide an input scale, you need to remap both relative directions separately:
+
+```toml
+[[remap]]
+input = ["REL_WHEEL"]
+output = ["REL_X-2"]
+
+[[remap]]
+input = ["REL_HWHEEL_HI_RES+4"]
+output = ["REL_Y+2"]
+
+[[remap]]
+input = ["REL_HWHEEL_HI_RES-4"]
+output = ["REL_Y+2"]
+```
+
 * How do I list available input devices?
   `sudo evremap list-devices`
 

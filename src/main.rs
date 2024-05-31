@@ -1,9 +1,12 @@
-use crate::mapping::*;
-use crate::remapper::*;
-use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::Duration;
+
+use anyhow::{Context, Result};
 use clap::Parser;
+use evdev_rs::enums::{EV_ABS, EV_KEY, EV_REL};
+
+use crate::mapping::*;
+use crate::remapper::InputMapper;
 
 mod deviceinfo;
 mod mapping;
@@ -40,10 +43,13 @@ enum Opt {
 }
 
 pub fn list_keys() -> Result<()> {
-    let mut keys: Vec<String> = EventCode::EV_KEY(KeyCode::KEY_RESERVED)
+    let mut keys: Vec<String> = EventCode::EV_KEY(EV_KEY::KEY_RESERVED)
         .iter()
+        .chain(EventCode::EV_REL(EV_REL::REL_X).iter()).chain(EventCode::EV_ABS(EV_ABS::ABS_X).iter())
         .filter_map(|code| match code {
             EventCode::EV_KEY(_) => Some(format!("{}", code)),
+            EventCode::EV_REL(_) => Some(format!("{}", code)),
+            EventCode::EV_ABS(_) => Some(format!("{}", code)),
             _ => None,
         })
         .collect();

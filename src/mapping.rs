@@ -1,9 +1,10 @@
 use anyhow::Context;
-pub use evdev_rs::enums::{EventCode, EventType, EV_KEY as KeyCode};
+pub use evdev_rs::enums::{EventCode, EventCode as KeyCode, EventType};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::Path;
 use thiserror::Error;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone)]
 pub struct MappingConfig {
@@ -34,7 +35,7 @@ impl MappingConfig {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Mapping {
     DualRole {
         input: KeyCode,
@@ -42,20 +43,49 @@ pub enum Mapping {
         tap: Vec<KeyCode>,
     },
     Remap {
-        input: HashSet<KeyCode>,
-        output: HashSet<KeyCode>,
+        input: HashSet<KeyCodeWrapper>,
+        output: HashSet<KeyCodeWrapper>,
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(try_from = "String")]
-struct KeyCodeWrapper {
-    pub code: KeyCode,
+pub struct KeyCodeWrapper {
+    pub code: EventCode,
+    pub scale: i32,
 }
 
-impl Into<KeyCode> for KeyCodeWrapper {
-    fn into(self) -> KeyCode {
-        self.code
+impl PartialEq for KeyCodeWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.code == other.code && self.scale.is_negative() == other.scale.is_negative()
+    }
+}
+
+impl Eq for KeyCodeWrapper {}
+
+impl PartialEq<EventCode> for KeyCodeWrapper {
+    fn eq(&self, other: &EventCode) -> bool {
+        self.code == *other
+    }
+}
+
+impl PartialEq<KeyCodeWrapper> for EventCode {
+    fn eq(&self, other: &KeyCodeWrapper) -> bool {
+        *self == other.code
+    }
+}
+
+impl Hash for KeyCodeWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.code.hash(state);
+        // Hash the direction filter only but not the magnitude
+        (if self.scale.is_negative() {-1} else {1}).hash(state);
+    }
+}
+
+impl From<KeyCodeWrapper> for KeyCode {
+    fn from(value: KeyCodeWrapper) -> Self {
+        value.code
     }
 }
 
@@ -70,12 +100,36 @@ pub enum ConfigError {
 impl std::convert::TryFrom<String> for KeyCodeWrapper {
     type Error = ConfigError;
     fn try_from(s: String) -> Result<KeyCodeWrapper, Self::Error> {
-        match EventCode::from_str(&EventType::EV_KEY, &s) {
-            Some(code) => match code {
-                EventCode::EV_KEY(code) => Ok(KeyCodeWrapper { code }),
-                _ => Err(ConfigError::ImpossibleParseKey),
+        let mut scale: i32 = 1;
+        let name: &str;
+        match s.rmatch_indices(&['+', '-']).next() {
+            None => {
+                name = &s;
+                scale = 0;
             },
-            None => Err(ConfigError::InvalidKey(s)),
+            Some(m) => {
+                let _scale;
+                (name, _scale) = s.split_at(m.0);
+                if _scale.len() > 1 {
+                    scale = _scale.parse::<i32>().unwrap();
+                } else if _scale == "-" {
+                    scale = -1;
+                }
+            },
+        };
+        let mut prefix = name.split_once("_").unwrap().0;
+        if prefix == "BTN" {
+            prefix = "KEY";
+        }
+        if prefix == "KEY" && scale == 0 {
+            scale = 1;
+        }
+        match EventType::from_str(&*("EV_".to_string() + prefix)) {
+            Some(event_type) => match EventCode::from_str(&event_type, &name) {
+                Some(code) => Ok(KeyCodeWrapper { code, scale }),
+                None => Err(ConfigError::InvalidKey(name.to_string())),
+            },
+            None => Err(ConfigError::InvalidKey(name.to_string())),
         }
     }
 }
