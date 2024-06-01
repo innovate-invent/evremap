@@ -36,6 +36,11 @@ enum Opt {
         /// Number of seconds for user to release keys on startup
         #[arg(short, long, default_value = "2")]
         delay: f64,
+
+        /// Grab the device, preventing any other process (including the kernel)
+        /// from receiving events from it
+        #[arg(short, long, action)]
+        grab: bool,
     },
 }
 
@@ -71,7 +76,7 @@ fn main() -> Result<()> {
     match opt {
         Opt::ListDevices => deviceinfo::list_devices(),
         Opt::ListKeys => list_keys(),
-        Opt::Remap { config_file, delay } => {
+        Opt::Remap { config_file, delay , grab} => {
             let mapping_config = MappingConfig::from_file(&config_file).context(format!(
                 "loading MappingConfig from {}",
                 config_file.display()
@@ -86,7 +91,7 @@ fn main() -> Result<()> {
             )?;
 
             let mut mapper = InputMapper::create_mapper(device_info.path, mapping_config.mappings)?;
-            mapper.run_mapper()
+            mapper.run_mapper(grab)
         }
     }
 }

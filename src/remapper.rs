@@ -115,8 +115,11 @@ impl InputMapper {
         })
     }
 
-    pub fn run_mapper(&mut self) -> Result<()> {
+    pub fn run_mapper(&mut self, grab: bool) -> Result<()> {
         log::info!("Going into read loop");
+        if grab {
+            self.input.grab(GrabMode::Grab);
+        }
         loop {
             let (status, event) = self
                 .input
@@ -410,6 +413,12 @@ fn is_modifier(key: &KeyCode) -> bool {
         | KeyCode::KEY_LEFTSHIFT
         | KeyCode::KEY_RIGHTSHIFT => true,
         _ => false,
+    }
+}
+
+impl Drop for InputMapper {
+    fn drop(&mut self) {
+        self.input.grab(GrabMode::Ungrab);
     }
 }
 
